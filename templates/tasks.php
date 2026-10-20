@@ -148,7 +148,9 @@ require APP_ROOT . '/templates/partials/filter_bar.php';
 
 <p class="table-note">
   Editing happens on a practice's own page, where the whole product context is visible.
-  <?php if (!$is_admin): ?>Sign in as an admin to make changes.<?php endif; ?>
+  <?php if (!$is_admin && !$can_edit_any): ?>
+    You can change the tasks assigned to you; ask an administrator about anything else.
+  <?php endif; ?>
 </p>
 
 <?php endif; ?>

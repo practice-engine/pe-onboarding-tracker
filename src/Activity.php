@@ -4,6 +4,14 @@ declare(strict_types=1);
 /** Append-only audit trail. Also the source of truth for "last updated". */
 final class Activity
 {
+    /**
+     * Record one change.
+     *
+     * $subjectId is whose work the entry is ABOUT, which is not the same
+     * as who did it. It is what the notifications list is read by, so a
+     * change to somebody's task reaches them even though the actor was
+     * someone else.
+     */
     public static function log(
         string $entity,
         string $action,
@@ -13,17 +21,19 @@ final class Activity
         ?string $field = null,
         ?string $oldValue = null,
         ?string $newValue = null,
-        ?string $summary = null
+        ?string $summary = null,
+        ?int $subjectId = null
     ): void {
         try {
             Database::run(
                 'INSERT INTO activity_log
-                   (practice_id, task_id, actor, entity, entity_id, action, field, old_value, new_value, summary)
-                 VALUES (:practice_id, :task_id, :actor, :entity, :entity_id, :action, :field, :old_value, :new_value, :summary)',
+                   (practice_id, task_id, actor, subject_id, entity, entity_id, action, field, old_value, new_value, summary)
+                 VALUES (:practice_id, :task_id, :actor, :subject_id, :entity, :entity_id, :action, :field, :old_value, :new_value, :summary)',
                 [
                     'practice_id' => $practiceId,
                     'task_id'     => $taskId,
                     'actor'       => Auth::actor(),
+                    'subject_id'  => $subjectId,
                     'entity'      => $entity,
                     'entity_id'   => $entityId,
                     'action'      => $action,
@@ -264,5 +274,110 @@ final class Activity
             return '';
         }
         return self::LABELS[$key] ?? ucfirst(str_replace('_', ' ', $key));
+    }
+
+    // -----------------------------------------------------------------
+    // Notifications
+    //
+    // Derived from the log rather than copied into a table of their own,
+    // so there is one history and no chance of the two disagreeing. All
+    // that is stored per person is how far through it they have read.
+    // -----------------------------------------------------------------
+
+    /**
+     * What is relevant to one person: entries about their work, and
+     * about the practices they are carrying work on.
+     *
+     * Their own actions are excluded. Being told what you just did is
+     * noise, and it is the fastest way to make somebody stop reading
+     * the list at all.
+     *
+     * Matching the actor by name is deliberate: the log stores a name
+     * so that it still reads correctly for the administrator and after
+     * a person is removed. It is the same string Auth::actor() wrote.
+     *
+     * @return array{0: string, 1: array<string,mixed>}
+     */
+    private static function relevantTo(int $assigneeId, string $actorName): array
+    {
+        $sql = '(
+                    l.subject_id = :me
+                    OR l.practice_id IN (
+                        SELECT DISTINCT pt.practice_id
+                          FROM practice_tasks pt
+                         WHERE pt.assignee_id = :me2
+                    )
+                )
+                AND l.actor <> :me_actor
+                AND l.entity <> :auth';
+
+        return [$sql, [
+            'me'       => $assigneeId,
+            'me2'      => $assigneeId,
+            'me_actor' => $actorName,
+            'auth'     => 'auth',
+        ]];
+    }
+
+    /** How many entries this person has not looked at yet. */
+    public static function unreadCount(int $assigneeId, string $actorName, ?string $seenAt): int
+    {
+        [$where, $args] = self::relevantTo($assigneeId, $actorName);
+
+        // A person who has never opened the list sees only what has
+        // happened since they were added, not the whole history.
+        $args['seen'] = $seenAt ?? '1970-01-01 00:00:00';
+
+        return (int) Database::scalar(
+            "SELECT COUNT(*) FROM activity_log l
+              WHERE {$where} AND l.created_at > :seen",
+            $args
+        );
+    }
+
+    /** The notifications list itself, newest first. */
+    public static function notificationsFor(
+        int $assigneeId,
+        string $actorName,
+        ?string $seenAt,
+        int $limit = 100
+    ): array {
+        [$where, $args] = self::relevantTo($assigneeId, $actorName);
+        $limit = max(1, min(200, $limit));
+
+        $rows = Database::all(
+            "SELECT l.*, pr.name AS practice_name, t.name AS task_name,
+                    pd.name AS product_name, pd.color AS product_color
+               FROM activity_log l
+               LEFT JOIN practices pr ON pr.id = l.practice_id
+               LEFT JOIN tasks t      ON t.id = l.task_id
+               LEFT JOIN products pd  ON pd.id = t.product_id
+              WHERE {$where}
+              ORDER BY l.created_at DESC, l.id DESC
+              LIMIT {$limit}",
+            $args
+        );
+
+        // Marking the boundary here rather than in the template keeps
+        // the "new" badge and the unread count reading the same rule.
+        // Compared as timestamps rather than as strings, so the two
+        // still agree if either value ever carries fractional seconds
+        // or a different DATETIME formatting.
+        $cut = strtotime($seenAt ?? '1970-01-01 00:00:00') ?: 0;
+        foreach ($rows as &$r) {
+            $r['is_new'] = (strtotime((string) $r['created_at']) ?: 0) > $cut;
+        }
+        unset($r);
+
+        return $rows;
+    }
+
+    /** Move a person's read marker to now. */
+    public static function markSeen(int $assigneeId): void
+    {
+        Database::run(
+            'UPDATE assignees SET notifications_seen_at = NOW() WHERE id = :id',
+            ['id' => $assigneeId]
+        );
     }
 }

@@ -229,14 +229,18 @@ $pctDone = (int) $totals['progress'];
   <section class="card">
     <h2 class="card-h">Open work by person</h2>
     <?php
+      // A name leads to that person's own page. Unassigned work has no
+      // page to go to, so it keeps pointing at the filtered task list.
       $chart_rows = array_map(static fn($r) => $r + [
-        'href'   => url('tasks', ['assignee_id' => $r['assignee_id'] ?: 'none']),
+        'href'   => $r['assignee_id']
+                      ? url('person', ['id' => (int) $r['assignee_id']])
+                      : url('tasks', ['assignee_id' => 'none', 'scope' => 'all']),
         'avatar' => true,
       ], $by_assignee);
       $chart_empty = 'Nothing open. Either everything is done, or no products are selected yet.';
       require APP_ROOT . '/templates/partials/bar_chart.php';
     ?>
-    <p class="table-note">Excludes completed work and anything marked Not Applicable.</p>
+    <p class="table-note">Excludes completed work and anything marked Not Applicable. Pick a name to see everything they are carrying.</p>
   </section>
 </div>
 

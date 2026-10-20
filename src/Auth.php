@@ -11,10 +11,11 @@ declare(strict_types=1);
  *   admin       The global administrator. Signs in with the PIN in
  *               config/config.php. May do anything, including delete.
  *   specialist  An Onboarding Specialist. Adds and edits practices,
- *               products, categories and the task library, moves any
- *               task forward on any practice, and reads the activity
- *               log. Cannot delete, deactivate or archive anything, and
- *               cannot reach People or the Archive.
+ *               products, categories and the task library, adds tasks
+ *               to a single practice, changes any task on any practice
+ *               including its status, assignee and due date, and reads
+ *               the activity log. Cannot delete, deactivate or archive
+ *               anything, and cannot reach People or the Archive.
  *   member      A team member. Sees everything, and may change only the
  *               tasks assigned to them.
  *   guest       Not signed in. Sees the sign-in page and nothing else.

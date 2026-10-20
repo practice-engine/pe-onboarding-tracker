@@ -71,11 +71,27 @@ $page_title = 'Task library';
     <label class="field f-grow"><span>Description</span>
       <input type="text" name="description" maxlength="500" placeholder="Optional detail shown under the task name"></label>
 
+    <label class="field"><span>Apply to</span>
+      <select name="applies_to">
+        <?php foreach (Repo::SCOPES as $k => $label): ?>
+          <option value="<?= e($k) ?>"><?= e($label) ?></option>
+        <?php endforeach; ?>
+      </select></label>
+
     <div class="form-actions">
       <button type="submit" class="btn btn-primary btn-sm">Add task</button>
     </div>
   </form>
   <p class="muted">It will land at the bottom of <?= e($product['name']) ?>'s list. Use the arrows to move it.</p>
+  <p class="table-note">
+    <strong>Apply to</strong> decides which practices pick the task up.
+    <em>All practices</em> is the usual choice: every practice on this product, now and in future.
+    <em>Open practices</em> fixes it to the practices in flight today, so a new practice started
+    next month will not inherit it. <em>Future practices</em> does the opposite, which is what you
+    want for a step that existing practices have already dealt with some other way.
+    Open is judged once, when you add the task, so a practice finishing its onboarding never
+    loses a task it has already worked on.
+  </p>
 </section>
 
 <div class="toolbar">
@@ -120,7 +136,7 @@ $page_title = 'Task library';
    * so the reorder and reset handlers move rows within their proper
    * parent.
    */
-  $cols = $can_delete ? 7 : 6;
+  $cols = $can_delete ? 8 : 7;
 ?>
 <div class="table-scroll">
 <table class="grid lib-grid">
@@ -131,6 +147,7 @@ $page_title = 'Task library';
       <th>Category</th>
       <th>Default assignee</th>
       <th>Description</th>
+      <th>Applies to</th>
       <th class="ta-c">Active</th>
       <?php if ($can_delete): ?><th class="c-act"></th><?php endif; ?>
     </tr>
@@ -203,6 +220,25 @@ $page_title = 'Task library';
       <td>
         <input form="gridform" type="text" maxlength="500" name="rows[<?= $id ?>][description]"
                value="<?= e($r['description'] ?? '') ?>" aria-label="Description">
+      </td>
+
+      <?php /* Shown, not editable. The set of practices a scoped task
+               reaches was fixed when it was added; re-pointing it later
+               would silently add or remove the task across practices
+               that have already recorded work against it. */ ?>
+      <td class="c-scope">
+        <?php if (!empty($r['practice_id'])): ?>
+          <span class="chip" title="This task belongs to one practice only">
+            <?= e($r['owning_practice_name'] ?? 'One practice') ?>
+          </span>
+        <?php elseif (($r['applies_to'] ?? 'all') === 'all'): ?>
+          <span class="muted">All practices</span>
+        <?php else: ?>
+          <span class="chip" title="Fixed when the task was added<?= !empty($r['scope_from'])
+                ? ', ' . e(fmt_date(substr((string) $r['scope_from'], 0, 10))) : '' ?>">
+            <?= e(Repo::SCOPES[$r['applies_to']] ?? 'All practices') ?>
+          </span>
+        <?php endif; ?>
       </td>
 
       <td class="ta-c">

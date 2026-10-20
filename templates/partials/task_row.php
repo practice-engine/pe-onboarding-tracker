@@ -5,15 +5,17 @@
  * @var array $t            derived task row
  * @var int   $practice_id
  * @var bool  $is_admin
+ * @var bool  $can_edit_any
  * @var ?int  $member_id
  * @var array $assignees
  */
 $tid    = (int) $t['task_id'];
 
-// The administrator may change anything. A team member may change only
-// the tasks that are theirs. The server checks this again on save; this
-// just avoids showing controls that would be refused.
-$can_edit = !empty($is_admin)
+// The administrator and an Onboarding Specialist may change any task,
+// since both run onboarding across practices. A team member may change
+// only the tasks that are theirs. The server checks this again on save;
+// this just avoids showing controls that would be refused.
+$can_edit = !empty($can_edit_any)
     || (isset($member_id) && $member_id !== null
         && (int) ($t['assignee_id'] ?? 0) === (int) $member_id);
 $status = (string) $t['status'];

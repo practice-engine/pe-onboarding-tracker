@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS assignees (
   username     VARCHAR(60) DEFAULT NULL,
   pin_hash     VARCHAR(255) DEFAULT NULL,
   last_login   DATETIME DEFAULT NULL,
+  -- How far through the activity log this person has read. Drives the
+  -- unread count on the Notifications link.
+  notifications_seen_at DATETIME DEFAULT NULL,
   role_title   VARCHAR(120) DEFAULT NULL,
   -- 'member' or 'specialist'. The administrator is not a row here.
   access_level VARCHAR(20) NOT NULL DEFAULT 'member',
@@ -75,6 +78,17 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- Whoever normally picks this task up. A practice task with no
   -- assignee of its own falls back to this one.
   default_assignee_id INT UNSIGNED DEFAULT NULL,
+  -- Which practices on the product this task reaches:
+  --   all             every practice, now and later
+  --   open_now        the practices pinned in task_practices
+  --   open_and_future those, plus any practice created after scope_from
+  --   future_only     only practices created after scope_from
+  applies_to   VARCHAR(20) NOT NULL DEFAULT 'all',
+  -- When the scope was fixed, which is what "future" is measured from.
+  scope_from   DATETIME DEFAULT NULL,
+  -- Set when the task belongs to one practice alone, which is how a
+  -- task added from inside a practice is kept to that practice.
+  practice_id  INT UNSIGNED DEFAULT NULL,
   name         VARCHAR(200) NOT NULL,
   description  TEXT DEFAULT NULL,
   sort_order   INT NOT NULL DEFAULT 0,
@@ -85,9 +99,23 @@ CREATE TABLE IF NOT EXISTS tasks (
   KEY ix_tasks_product (product_id, sort_order, id),
   KEY ix_tasks_category (category_id),
   KEY ix_tasks_default_assignee (default_assignee_id),
+  KEY ix_tasks_practice (practice_id),
   CONSTRAINT fk_tasks_product  FOREIGN KEY (product_id)  REFERENCES products (id)   ON DELETE CASCADE,
   CONSTRAINT fk_tasks_category FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE RESTRICT,
-  CONSTRAINT fk_tasks_default_assignee FOREIGN KEY (default_assignee_id) REFERENCES assignees (id) ON DELETE SET NULL
+  CONSTRAINT fk_tasks_default_assignee FOREIGN KEY (default_assignee_id) REFERENCES assignees (id) ON DELETE SET NULL,
+  CONSTRAINT fk_tasks_practice FOREIGN KEY (practice_id) REFERENCES practices (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Practices a scoped task was pinned to, written once when the task is
+-- added. Membership is a stored fact rather than a re-evaluated query,
+-- so the set cannot drift as practices complete.
+CREATE TABLE IF NOT EXISTS task_practices (
+  task_id     INT UNSIGNED NOT NULL,
+  practice_id INT UNSIGNED NOT NULL,
+  PRIMARY KEY (task_id, practice_id),
+  KEY ix_tp_practice (practice_id),
+  CONSTRAINT fk_tp_task     FOREIGN KEY (task_id)     REFERENCES tasks (id)     ON DELETE CASCADE,
+  CONSTRAINT fk_tp_practice FOREIGN KEY (practice_id) REFERENCES practices (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------
@@ -163,6 +191,11 @@ CREATE TABLE IF NOT EXISTS activity_log (
   practice_id  INT UNSIGNED DEFAULT NULL,
   task_id      INT UNSIGNED DEFAULT NULL,
   actor        VARCHAR(120) NOT NULL DEFAULT 'admin',
+  -- Whose work this entry is about, as opposed to `actor`, who did it.
+  -- An id because it is matched against the signed-in person; `actor`
+  -- stays a name so it still reads correctly for the administrator,
+  -- who is not a row in assignees.
+  subject_id   INT UNSIGNED DEFAULT NULL,
   entity       VARCHAR(60) NOT NULL,
   entity_id    INT UNSIGNED DEFAULT NULL,
   action       VARCHAR(40) NOT NULL,
@@ -180,7 +213,8 @@ CREATE TABLE IF NOT EXISTS activity_log (
   KEY ix_log_actor (actor, created_at),
   KEY ix_log_action (action, created_at),
   KEY ix_log_entity (entity, created_at),
-  KEY ix_log_field (field, created_at)
+  KEY ix_log_field (field, created_at),
+  KEY ix_log_subject (subject_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS app_settings (

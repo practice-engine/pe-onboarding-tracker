@@ -33,6 +33,19 @@ function render(string $template, array $vars = []): void
     $vars['flashes']  = take_flashes();
     $vars['template'] = $template;
 
+    // The unread count sits in the sidebar, so every page needs it. The
+    // administrator is not a person and so has nothing to follow.
+    $me = Auth::memberId();
+    $vars['unread_count'] = 0;
+    if ($me !== null) {
+        $m = Auth::member();
+        $vars['unread_count'] = Activity::unreadCount(
+            $me,
+            Auth::actor(),
+            $m['notifications_seen_at'] ?? null
+        );
+    }
+
     extract($vars, EXTR_SKIP);
     $__template = APP_ROOT . '/templates/' . $template . '.php';
 
@@ -404,7 +417,9 @@ if ($method === 'POST') {
     // Which writes each role may reach. Anything not listed is the
     // administrator's alone, so a new route is locked down by default
     // rather than accidentally open.
-    $openToAnyone = ['api/task-save', 'bulk-save', 'practice-notes-save', 'task-done'];
+    // Clearing your own notifications is yours to do whatever your role.
+    $openToAnyone = ['api/task-save', 'bulk-save', 'practice-notes-save', 'task-done',
+                     'notifications-seen'];
 
     $needsPractices = ['practice-save', 'practice-share'];
     $needsLibrary   = ['task-save', 'tasks-save-all', 'task-move', 'tasks-renumber'];
@@ -900,7 +915,18 @@ if ($method === 'POST') {
             $productId  = (int) ($_POST['product_id'] ?? 0);
             $categoryId = (int) ($_POST['category_id'] ?? 0);
             $name       = post_str('name');
-            $back       = url('admin/tasks', ['product_id' => $productId ?: null]);
+
+            // A task added from inside a practice came from that
+            // practice's page, so that is where any complaint about it
+            // belongs. Resolved before validation so a rejected add
+            // does not land the person in the task library instead.
+            $fromPractice = post_int_or_null('practice_id');
+            if ($fromPractice !== null && !Repo::practice($fromPractice)) {
+                $fromPractice = null;
+            }
+            $back = $fromPractice !== null
+                ? url('practice', ['id' => $fromPractice])
+                : url('admin/tasks', ['product_id' => $productId ?: null]);
 
             if ($name === '' || !Repo::product($productId) || !Repo::category($categoryId)) {
                 flash('A task needs a name, a product, and a category.', 'error');
@@ -931,25 +957,34 @@ if ($method === 'POST') {
                     'Global task updated: ' . $name);
                 flash('Task updated everywhere it appears.');
             } else {
-                Database::run(
-                    'INSERT INTO tasks (product_id, category_id, default_assignee_id,
-                                        name, description, sort_order, is_active)
-                     VALUES (:product_id, :category_id, :default_assignee_id,
-                             :name, :description, :sort_order, 1)',
-                    ['product_id' => $productId, 'category_id' => $categoryId,
-                     'default_assignee_id' => $defaultAssignee, 'name' => $name,
-                     'description' => $desc, 'sort_order' => Repo::nextTaskSort($productId)]
-                );
-                $newId = Database::lastId();
-                $count = (int) Database::scalar(
-                    'SELECT COUNT(*) FROM practice_products WHERE product_id = :pid',
-                    ['pid' => $productId]
-                );
-                Activity::log('task', 'create', $newId, null, $newId, null, null, $name,
-                    'Global task created: ' . $name);
+                // A task added from inside a practice stays with that
+                // practice; one added from the library takes a scope.
+                $newId = Repo::createTask([
+                    'product_id'          => $productId,
+                    'category_id'         => $categoryId,
+                    'default_assignee_id' => $defaultAssignee,
+                    'applies_to'          => post_str('applies_to'),
+                    'name'                => $name,
+                    'description'         => $desc,
+                ], $fromPractice);
+
+                Activity::log('task', 'create', $newId, $fromPractice, $newId, null, null, $name,
+                    $fromPractice !== null
+                        ? 'Task added to this practice: ' . $name
+                        : 'Global task created: ' . $name,
+                    $defaultAssignee);
+
+                if ($fromPractice !== null) {
+                    flash('"' . $name . '" added to this practice, as Not Started. '
+                        . 'It belongs to this practice alone and does not affect any other.');
+                    redirect($back);
+                }
+
+                $reach = Repo::taskReach($newId);
                 flash(sprintf(
-                    'Task added. It now appears for %d practice(s) onboarding this product, as Not Started.',
-                    $count
+                    'Task added. It applies to %d practice(s) right now, as Not Started. (%s)',
+                    $reach,
+                    Repo::SCOPES[post_str('applies_to')] ?? Repo::SCOPES['all']
                 ));
             }
             redirect($back);
@@ -1244,6 +1279,18 @@ if ($method === 'POST') {
             redirect(url('admin/archive'));
         }
 
+        // ---- Mark every notification as read ---------------------------
+        case 'notifications-seen': {
+            $me = Auth::memberId();
+            // The administrator is not a person, so has no marker to
+            // move and no notifications page to go back to.
+            if ($me === null) {
+                redirect(url('dashboard'));
+            }
+            Activity::markSeen($me);
+            redirect(url('notifications'));
+        }
+
         // ---- Notes on a practice --------------------------------------
         case 'practice-notes-save': {
             $practiceId = (int) ($_POST['id'] ?? 0);
@@ -1471,6 +1518,70 @@ switch ($route) {
             'products'   => Repo::products(),
             'categories' => Repo::categories(),
             'assignees'  => Repo::assignees(),
+        ]);
+        break;
+    }
+
+    case 'person': {
+        $id     = (int) ($_GET['id'] ?? 0);
+        $person = Repo::assignee($id);
+        if (!$person) {
+            not_found('That person does not exist.');
+        }
+
+        // Closed work is loaded only when asked for. Most visits are
+        // about what somebody still has to do.
+        $showClosed = !empty($_GET['closed']);
+        $openTasks  = Repo::tasksForPerson($id, false);
+
+        // The headline numbers are counted from the very list shown
+        // below them. Repo::openCountsFor() answers a narrower question
+        // (it drops practices whose onboarding is finished), and using
+        // it here would print a total that disagrees with the rows the
+        // reader can see.
+        $work = ['open_count' => count($openTasks), 'blocked' => 0, 'overdue' => 0];
+        foreach ($openTasks as $t) {
+            if ($t['status'] === 'blocked') { $work['blocked']++; }
+            if (!empty($t['is_overdue']))   { $work['overdue']++; }
+        }
+
+        render('person', [
+            'person'        => $person,
+            'open_tasks'    => $openTasks,
+            'closed_tasks'  => $showClosed ? Repo::tasksForPerson($id, true) : [],
+            'show_closed'   => $showClosed,
+            'practices'     => Repo::practicesForPerson($id),
+            'default_tasks' => Repo::defaultTasksFor($id),
+            'work'          => $work,
+            'is_me'         => Auth::memberId() === $id,
+        ]);
+        break;
+    }
+
+    case 'notifications': {
+        $me = Auth::memberId();
+        // The administrator signs in with a PIN that is not tied to a
+        // person, so there is nobody for changes to be "about".
+        if ($me === null) {
+            render('error', [
+                'title'   => 'No notifications here',
+                'message' => 'Notifications follow a person\'s own tasks and practices. '
+                           . 'The administrator PIN is not tied to a person, so there is '
+                           . 'nothing to follow. The Activity log shows every change.',
+            ]);
+            exit;
+        }
+
+        $member = Auth::member();
+        $seenAt = $member['notifications_seen_at'] ?? null;
+        $rows   = Activity::notificationsFor($me, Auth::actor(), $seenAt);
+
+        render('notifications', [
+            'rows' => $rows,
+            // Counted over the whole log, not over the page's capped
+            // list, so this always agrees with the sidebar badge even
+            // when somebody has more unread than the page shows.
+            'unread' => Activity::unreadCount($me, Auth::actor(), $seenAt),
         ]);
         break;
     }

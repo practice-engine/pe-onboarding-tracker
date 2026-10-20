@@ -54,6 +54,7 @@
   <symbol id="i-people" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/></symbol>
   <symbol id="i-arch" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1.5"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></symbol>
   <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></symbol>
   <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></symbol>
 </svg>
 
@@ -72,6 +73,14 @@
   <a href="<?= e(url('dashboard')) ?>"<?= $on(['dashboard']) ?>><svg><use href="#i-grid"/></svg> Dashboard</a>
   <a href="<?= e(url('practices')) ?>"<?= $on(['practices', 'practice', 'admin/practice-form']) ?>><svg><use href="#i-build"/></svg> Practices</a>
   <a href="<?= e(url('tasks')) ?>"<?= $on(['tasks']) ?>><svg><use href="#i-check"/></svg> <?= Auth::isMember() ? 'My tasks' : 'All tasks' ?></a>
+  <?php if (Auth::isMember()): ?>
+    <a href="<?= e(url('notifications')) ?>"<?= $on(['notifications']) ?>>
+      <svg><use href="#i-bell"/></svg> Notifications
+      <?php if (($unread_count ?? 0) > 0): ?>
+        <span class="side-badge" aria-label="<?= (int) $unread_count ?> unread"><?= $unread_count > 99 ? '99+' : (int) $unread_count ?></span>
+      <?php endif; ?>
+    </a>
+  <?php endif; ?>
 
   <?php if ($can_library || $can_catalogue): ?>
     <div class="side-group">Set up</div>

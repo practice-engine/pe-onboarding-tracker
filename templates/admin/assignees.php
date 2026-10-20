@@ -126,12 +126,15 @@ $page_title = 'People';
         </td>
 
         <td class="c-act">
-          <form method="post" action="<?= e(url('assignee-delete')) ?>" class="inline-form" data-leaves-page
-                data-confirm="Remove <?= e($r['name']) ?>? If they hold assignments, they will be deactivated instead of deleted.">
-            <?= Csrf::field() ?>
-            <input type="hidden" name="id" value="<?= $id ?>">
-            <button type="submit" class="btn btn-danger btn-xs">Remove</button>
-          </form>
+          <span class="row-act">
+            <a class="btn btn-quiet btn-xs" href="<?= e(url('person', ['id' => $id])) ?>">Profile</a>
+            <form method="post" action="<?= e(url('assignee-delete')) ?>" class="inline-form" data-leaves-page
+                  data-confirm="Remove <?= e($r['name']) ?>? If they hold assignments, they will be deactivated instead of deleted.">
+              <?= Csrf::field() ?>
+              <input type="hidden" name="id" value="<?= $id ?>">
+              <button type="submit" class="btn btn-danger btn-xs">Remove</button>
+            </form>
+          </span>
         </td>
       </tr>
     <?php endforeach; ?>
@@ -144,8 +147,9 @@ $page_title = 'People';
 <p class="table-note">
   <strong>Team member</strong> sees everything and changes only the tasks assigned to them.
   <strong>Onboarding Specialist</strong> can also add and edit practices, shape the task library,
-  and move any task forward on any practice. Neither can delete, deactivate or archive anything,
-  and neither can reach Products, Categories, People or the Archive.
+  add a task to a single practice, and change any task on any practice, including its status,
+  assignee and due date. Neither can delete, deactivate or archive anything, and neither can
+  reach People or the Archive.
 </p>
 <p class="table-note">
   People sign in with their PIN alone, so every PIN has to be different. If you type one that is

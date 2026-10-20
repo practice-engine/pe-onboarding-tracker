@@ -27,6 +27,47 @@ final class Repo
      */
     private const ASG = 'COALESCE(pt.assignee_id, t.default_assignee_id)';
 
+    /** The scopes a library task can be given, in the order they are offered. */
+    public const SCOPES = [
+        'all'             => 'All practices',
+        'open_now'        => 'Only open practices',
+        'open_and_future' => 'Only open and future practices',
+        'future_only'     => 'Only future practices',
+    ];
+
+    /**
+     * Does this task reach this practice?
+     *
+     * Joining a practice to its products is no longer the whole story: a
+     * task can be scoped to a set of practices, or belong to one alone.
+     * The condition is written once here and added to every query that
+     * derives a practice's task list, so no two screens can disagree
+     * about which tasks exist.
+     *
+     * `$pr` and `$t` are the practices and tasks aliases. Both are
+     * literals passed in from the code below, never from a request.
+     *
+     * open_now is answered from task_practices, a set fixed when the
+     * task was added, rather than by re-reading each practice's state
+     * now. A practice completing its onboarding must not make a task it
+     * already worked on vanish from its record.
+     */
+    private static function scopeWhere(string $pr = 'pr', string $t = 't'): string
+    {
+        return "(
+            ({$t}.practice_id IS NULL OR {$t}.practice_id = {$pr}.id)
+            AND (
+                {$t}.applies_to = 'all'
+                OR ({$t}.applies_to IN ('open_now','open_and_future')
+                    AND EXISTS (SELECT 1 FROM task_practices tp2
+                                 WHERE tp2.task_id = {$t}.id AND tp2.practice_id = {$pr}.id))
+                OR ({$t}.applies_to IN ('open_and_future','future_only')
+                    AND {$t}.scope_from IS NOT NULL
+                    AND {$pr}.created_at > {$t}.scope_from)
+            )
+        )";
+    }
+
     /** Reusable aggregate columns for any progress rollup. */
     private static function aggCols(): string
     {
@@ -130,11 +171,13 @@ final class Repo
             'SELECT t.*, p.name AS product_name, p.sort_order AS product_sort,
                     c.name AS category_name, c.sort_order AS category_sort,
                     c.color AS category_color,
-                    da.name AS default_assignee_name
+                    da.name AS default_assignee_name,
+                    own.name AS owning_practice_name
                FROM tasks t
                JOIN products p    ON p.id = t.product_id
                JOIN categories c  ON c.id = t.category_id
                LEFT JOIN assignees da ON da.id = t.default_assignee_id
+               LEFT JOIN practices own ON own.id = t.practice_id
               WHERE ' . implode(' AND ', $where) . '
               ORDER BY p.sort_order, p.name, c.sort_order, c.name, t.sort_order, t.id',
             $args
@@ -150,6 +193,83 @@ final class Repo
                JOIN categories c ON c.id = t.category_id
               WHERE t.id = :id',
             ['id' => $id]
+        );
+    }
+
+    /**
+     * Add a task to the library and fix its scope.
+     *
+     * For the two scopes that include practices open right now, the
+     * matching practices are written into task_practices here and never
+     * recalculated. That is the whole point: "the practices that were
+     * open when I added this" is a fact about a moment, and re-deriving
+     * it later would quietly change which practices the task applies to
+     * as their states move on.
+     *
+     * $practiceId pins the task to a single practice, for a task added
+     * from inside one. Scope is irrelevant then and is stored as 'all',
+     * because practice_id alone already limits it.
+     *
+     * Returns the new task's id.
+     */
+    public static function createTask(array $f, ?int $practiceId = null): int
+    {
+        $scope = (string) ($f['applies_to'] ?? 'all');
+        if (!isset(self::SCOPES[$scope])) {
+            $scope = 'all';
+        }
+        if ($practiceId !== null) {
+            $scope = 'all';
+        }
+
+        Database::run(
+            'INSERT INTO tasks (product_id, category_id, default_assignee_id, applies_to,
+                                scope_from, practice_id, name, description, sort_order, is_active)
+             VALUES (:product_id, :category_id, :default_assignee_id, :applies_to,
+                     NOW(), :practice_id, :name, :description, :sort_order, 1)',
+            [
+                'product_id'          => (int) $f['product_id'],
+                'category_id'         => (int) $f['category_id'],
+                'default_assignee_id' => $f['default_assignee_id'] ?? null,
+                'applies_to'          => $scope,
+                'practice_id'         => $practiceId,
+                'name'                => (string) $f['name'],
+                'description'         => $f['description'] ?? null,
+                'sort_order'          => self::nextTaskSort((int) $f['product_id']),
+            ]
+        );
+        $taskId = Database::lastId();
+
+        if (in_array($scope, ['open_now', 'open_and_future'], true)) {
+            // Open means in flight: on this product, not archived, and
+            // not already finished. A completed practice is not going
+            // to pick up new onboarding work.
+            Database::run(
+                "INSERT INTO task_practices (task_id, practice_id)
+                 SELECT :tid, pr.id
+                   FROM practices pr
+                   JOIN practice_products pp ON pp.practice_id = pr.id
+                  WHERE pp.product_id = :pid
+                    AND pr.is_archived = 0
+                    AND pr.onboarding_state <> 'completed'",
+                ['tid' => $taskId, 'pid' => (int) $f['product_id']]
+            );
+        }
+
+        return $taskId;
+    }
+
+    /** How many practices a task reaches right now. For the confirmation message. */
+    public static function taskReach(int $taskId): int
+    {
+        $scope = self::scopeWhere();
+        return (int) Database::scalar(
+            "SELECT COUNT(DISTINCT pr.id)
+               FROM tasks t
+               JOIN practice_products pp ON pp.product_id = t.product_id
+               JOIN practices pr         ON pr.id = pp.practice_id AND pr.is_archived = 0
+              WHERE t.id = :tid AND {$scope}",
+            ['tid' => $taskId]
         );
     }
 
@@ -274,7 +394,8 @@ final class Repo
             $args['fproduct'] = (int) $f['product_id'];
         }
 
-        $agg = self::aggCols();
+        $agg   = self::aggCols();
+        $scope = self::scopeWhere();
 
         $rows = Database::all(
             "SELECT pr.id, pr.name, pr.slug, pr.location, pr.onboarding_state,
@@ -284,6 +405,7 @@ final class Repo
                LEFT JOIN practice_products pp ON pp.practice_id = pr.id
                LEFT JOIN products p           ON p.id = pp.product_id AND p.is_active = 1
                LEFT JOIN tasks t              ON t.product_id = p.id AND t.is_active = 1
+                                             AND {$scope}
                LEFT JOIN practice_tasks pt    ON pt.practice_id = pr.id AND pt.task_id = t.id
               WHERE " . implode(' AND ', $where) . "
               GROUP BY pr.id, pr.name, pr.slug, pr.location, pr.onboarding_state,
@@ -397,6 +519,7 @@ final class Repo
         $where = ['pp.practice_id = :pid'];
         $args  = ['pid' => $practiceId];
         $st    = self::ST;
+        $scope = self::scopeWhere();
 
         if (!empty($f['product_id'])) {
             $where[] = 'p.id = :product_id';
@@ -452,8 +575,10 @@ final class Repo
                     pt.due_date, pt.notes, pt.updated_at,
                     a.name AS assignee_name
                FROM practice_products pp
+               JOIN practices pr           ON pr.id = pp.practice_id
                JOIN products p             ON p.id = pp.product_id AND p.is_active = 1
                JOIN tasks t                ON t.product_id = p.id AND t.is_active = 1
+                                          AND {$scope}
                JOIN categories c           ON c.id = t.category_id
                LEFT JOIN practice_tasks pt ON pt.practice_id = pp.practice_id AND pt.task_id = t.id
                LEFT JOIN assignees a       ON a.id = {$asg}
@@ -614,10 +739,12 @@ final class Repo
     /** The JOIN chain every dashboard aggregate shares. */
     private static function openTasksJoins(): string
     {
+        $scope = self::scopeWhere();
         return "FROM practices pr
                 JOIN practice_products pp   ON pp.practice_id = pr.id
                 JOIN products p             ON p.id = pp.product_id AND p.is_active = 1
                 JOIN tasks t                ON t.product_id = p.id AND t.is_active = 1
+                                           AND {$scope}
                 JOIN categories c           ON c.id = t.category_id
                 LEFT JOIN practice_tasks pt ON pt.practice_id = pr.id AND pt.task_id = t.id";
     }
@@ -748,6 +875,7 @@ final class Repo
         $days  = max(1, min(365, $days));
         $limit = max(1, min(50, $limit));
         $st    = self::ST;
+        $scope = self::scopeWhere();
 
         return Database::all(
             "SELECT pr.id, pr.name, pr.target_go_live_date,
@@ -758,6 +886,7 @@ final class Repo
                LEFT JOIN practice_products pp ON pp.practice_id = pr.id
                LEFT JOIN products p           ON p.id = pp.product_id AND p.is_active = 1
                LEFT JOIN tasks t              ON t.product_id = p.id AND t.is_active = 1
+                                             AND {$scope}
                LEFT JOIN practice_tasks pt    ON pt.practice_id = pr.id AND pt.task_id = t.id
               WHERE pr.is_archived = 0
                 AND pr.onboarding_state <> 'completed'
@@ -802,6 +931,7 @@ final class Repo
         $where = [];
         $args  = [];
         $st    = self::ST;
+        $scope = self::scopeWhere();
 
         $where[] = empty($f['include_archived']) ? 'pr.is_archived = 0' : '1 = 1';
 
@@ -866,6 +996,7 @@ final class Repo
                JOIN practice_products pp   ON pp.practice_id = pr.id
                JOIN products p             ON p.id = pp.product_id AND p.is_active = 1
                JOIN tasks t                ON t.product_id = p.id AND t.is_active = 1
+                                          AND {$scope}
                JOIN categories c           ON c.id = t.category_id
                LEFT JOIN practice_tasks pt ON pt.practice_id = pr.id AND pt.task_id = t.id
                LEFT JOIN assignees a       ON a.id = {$asg}
@@ -886,6 +1017,81 @@ final class Repo
     }
 
     // =================================================================
+    // One person's profile
+    // =================================================================
+
+    /**
+     * Everything assigned to one person, across every practice.
+     *
+     * Built on tasksAcrossPractices so a person's own page cannot
+     * disagree with the All tasks list about what they hold. Archived
+     * practices stay out, as everywhere else.
+     *
+     * @param bool $closed completed and not-applicable work instead of open
+     */
+    public static function tasksForPerson(int $assigneeId, bool $closed = false): array
+    {
+        $rows = self::tasksAcrossPractices([
+            'assignee_id'    => $assigneeId,
+            'show_completed' => true,
+        ], 2000);
+
+        return array_values(array_filter($rows, static function ($r) use ($closed) {
+            $done = in_array($r['status'], ['completed', 'not_applicable'], true);
+            return $closed ? $done : !$done;
+        }));
+    }
+
+    /**
+     * Which practices a person is carrying work on, with how much.
+     *
+     * Archived practices are excluded, as everywhere else, but
+     * completed ones are not: this has to agree with the task list on
+     * the same page, which shows every open task wherever it sits.
+     */
+    public static function practicesForPerson(int $assigneeId): array
+    {
+        $st    = self::ST;
+        $asg   = self::ASG;
+        $scope = self::scopeWhere();
+
+        return Database::all(
+            "SELECT pr.id, pr.name, pr.onboarding_state, pr.target_go_live_date,
+                    COUNT(*) AS open_count,
+                    SUM(CASE WHEN {$st} = 'blocked' THEN 1 ELSE 0 END) AS blocked,
+                    SUM(CASE WHEN pt.due_date IS NOT NULL AND pt.due_date < CURDATE()
+                             THEN 1 ELSE 0 END) AS overdue
+               FROM practices pr
+               JOIN practice_products pp   ON pp.practice_id = pr.id
+               JOIN products p             ON p.id = pp.product_id AND p.is_active = 1
+               JOIN tasks t                ON t.product_id = p.id AND t.is_active = 1
+                                          AND {$scope}
+               LEFT JOIN practice_tasks pt ON pt.practice_id = pr.id AND pt.task_id = t.id
+              WHERE pr.is_archived = 0
+                AND {$st} NOT IN ('completed','not_applicable')
+                AND {$asg} = :me
+              GROUP BY pr.id, pr.name, pr.onboarding_state, pr.target_go_live_date
+              ORDER BY open_count DESC, pr.name",
+            ['me' => $assigneeId]
+        );
+    }
+
+    /** Tasks in the library this person picks up by default. */
+    public static function defaultTasksFor(int $assigneeId): array
+    {
+        return Database::all(
+            'SELECT t.id, t.name, p.name AS product_name, p.color AS product_color,
+                    c.name AS category_name
+               FROM tasks t
+               JOIN products p   ON p.id = t.product_id
+               JOIN categories c ON c.id = t.category_id
+              WHERE t.default_assignee_id = :me AND t.is_active = 1
+              ORDER BY p.sort_order, t.sort_order, t.id',
+            ['me' => $assigneeId]
+        );
+    }
+
+    // =================================================================
     // Writes to per-practice task state
     // =================================================================
 
@@ -897,13 +1103,19 @@ final class Repo
      */
     public static function saveTaskState(int $practiceId, int $taskId, array $changes): array
     {
-        // The task must belong to a product this practice actually onboards.
+        // The task must belong to a product this practice onboards, and
+        // its scope must actually reach this practice. Checked on the
+        // write path too, so a task that is merely not displayed cannot
+        // still be edited through a hand-made request.
+        $scope = self::scopeWhere();
         $valid = Database::scalar(
-            'SELECT 1
+            "SELECT 1
                FROM tasks t
                JOIN practice_products pp ON pp.product_id = t.product_id
+               JOIN practices pr         ON pr.id = pp.practice_id
               WHERE t.id = :tid AND pp.practice_id = :pid AND t.is_active = 1
-              LIMIT 1',
+                AND {$scope}
+              LIMIT 1",
             ['tid' => $taskId, 'pid' => $practiceId]
         );
         if (!$valid) {
@@ -965,22 +1177,51 @@ final class Repo
             );
         }
 
+        // Who the change is about. Normally whoever holds the task
+        // afterwards, falling back to the library's default owner when
+        // this practice has not picked anyone.
+        $owner = $after['assignee_id'] !== null
+            ? (int) $after['assignee_id']
+            : (int) (Database::scalar(
+                'SELECT default_assignee_id FROM tasks WHERE id = :tid',
+                ['tid' => $taskId]
+            ) ?? 0);
+
         // Log only the fields that actually changed.
         foreach (['status', 'assignee_id', 'due_date', 'notes'] as $field) {
             if ((string) ($before[$field] ?? '') === (string) ($after[$field] ?? '')) {
                 continue;
             }
-            Activity::log(
-                'practice_task',
-                'update',
-                $taskId,
-                $practiceId,
-                $taskId,
-                $field,
-                self::describe($field, $before[$field]),
-                self::describe($field, $after[$field]),
-                self::changeSummary($field, $before[$field], $after[$field])
-            );
+
+            // Handing a task away concerns the person losing it as much
+            // as the one gaining it, so the entry is written against
+            // each of them in turn.
+            $subjects = [$owner];
+            if ($field === 'assignee_id' && $before['assignee_id'] !== null) {
+                $subjects[] = (int) $before['assignee_id'];
+            }
+            $subjects = array_values(array_unique(array_filter($subjects)));
+
+            // An unowned task still belongs in the audit trail, just
+            // with nobody to notify, so one entry goes in regardless.
+            if (!$subjects) {
+                $subjects = [null];
+            }
+
+            foreach ($subjects as $subject) {
+                Activity::log(
+                    'practice_task',
+                    'update',
+                    $taskId,
+                    $practiceId,
+                    $taskId,
+                    $field,
+                    self::describe($field, $before[$field]),
+                    self::describe($field, $after[$field]),
+                    self::changeSummary($field, $before[$field], $after[$field]),
+                    $subject
+                );
+            }
         }
 
         // Touch the practice so Last updated moves even for a note-only edit.

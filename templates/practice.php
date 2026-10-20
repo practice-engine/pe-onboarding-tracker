@@ -19,6 +19,7 @@
  * @var bool  $is_admin
  * @var ?int  $member_id
  * @var bool  $can_practices
+ * @var bool  $can_library
  * @var bool  $can_edit_any
  */
 $page_title  = (string) $practice['name'];
@@ -101,7 +102,11 @@ $days        = days_until($practice['target_go_live_date'] ?? null);
   foreach ($openRows as $r) {
       $key = $r['assignee_name'] ?: 'Unassigned';
       if (!isset($byPerson[$key])) {
-          $byPerson[$key] = ['label' => $key, 'open_count' => 0, 'blocked' => 0, 'overdue' => 0];
+          $byPerson[$key] = [
+              'label' => $key, 'open_count' => 0, 'blocked' => 0, 'overdue' => 0,
+              // Carried so the bar can link to the person's own page.
+              'assignee_id' => $r['assignee_id'] ?? null,
+          ];
       }
       $byPerson[$key]['open_count']++;
       if ($r['status'] === 'blocked')  { $byPerson[$key]['blocked']++; }
@@ -198,7 +203,10 @@ $days        = days_until($practice['target_go_live_date'] ?? null);
   <section class="card">
     <h2 class="card-h">Who is carrying the work here</h2>
     <?php
-      $chart_rows  = array_map(static fn($r) => $r + ['avatar' => true], array_values($byPerson));
+      $chart_rows  = array_map(static fn($r) => $r + [
+        'avatar' => true,
+        'href'   => !empty($r['assignee_id']) ? url('person', ['id' => (int) $r['assignee_id']]) : null,
+      ], array_values($byPerson));
       $chart_empty = 'Nothing outstanding on this practice.';
       require APP_ROOT . '/templates/partials/bar_chart.php';
     ?>
@@ -426,6 +434,55 @@ require APP_ROOT . '/templates/partials/filter_bar.php';
   <?php endif; ?>
 </form>
 
+<?php endif; ?>
+
+<?php if ($can_library && $products): ?>
+  <section class="card">
+    <h2 class="card-h">Add a task to this practice</h2>
+    <p class="muted">
+      For something only this practice needs. It is added to
+      <?= e($practice['name']) ?> alone and appears nowhere else, so the task library and
+      every other practice are left untouched.
+    </p>
+    <form method="post" action="<?= e(url('task-save')) ?>" class="row-form">
+      <?= Csrf::field() ?>
+      <input type="hidden" name="is_active" value="1">
+      <input type="hidden" name="practice_id" value="<?= $practice_id ?>">
+
+      <label class="field f-grow"><span>Task name <abbr class="req" title="Required">*</abbr></span>
+        <input type="text" name="name" required maxlength="200"
+               placeholder="e.g. Chase signed BAA"></label>
+
+      <label class="field"><span>Product <abbr class="req" title="Required">*</abbr></span>
+        <select name="product_id" required>
+          <?php foreach ($products as $p): ?>
+            <option value="<?= (int) $p['id'] ?>"><?= e($p['name']) ?></option>
+          <?php endforeach; ?>
+        </select></label>
+
+      <label class="field"><span>Category <abbr class="req" title="Required">*</abbr></span>
+        <select name="category_id" required>
+          <?php foreach ($categories as $c): ?>
+            <option value="<?= (int) $c['id'] ?>"><?= e($c['name']) ?></option>
+          <?php endforeach; ?>
+        </select></label>
+
+      <label class="field"><span>Assign to</span>
+        <select name="default_assignee_id">
+          <option value="">Nobody yet</option>
+          <?php foreach ($assignees as $a): ?>
+            <option value="<?= (int) $a['id'] ?>"
+              <?= ($member_id !== null && (int) $a['id'] === $member_id) ? 'selected' : '' ?>>
+              <?= e($a['name']) ?>
+            </option>
+          <?php endforeach; ?>
+        </select></label>
+
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-sm">Add task</button>
+      </div>
+    </form>
+  </section>
 <?php endif; ?>
 
 <?php if ($can_practices): ?>
